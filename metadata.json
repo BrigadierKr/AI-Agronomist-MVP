@@ -1,0 +1,6 @@
+{
+  "name": "AI Agronomist",
+  "description": "Precision agronomy recommendation engine & crop calculator with multilingual AI guidance (EN, UK, RU).",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
