@@ -23,24 +23,47 @@ const ipRequestCounts = new Map<string, { count: number; resetTime: number }>();
 function apiRateLimiter(maxRequests = 20, windowMs = 60 * 1000) {
   return (req: express.Request, res: express.Response, next: express.NextFunction) => {
     const clientIp = (req.headers["x-forwarded-for"] as string) || req.socket.remoteAddress || "unknown";
+    const userIdentifier = (req.headers["x-user-id"] as string) || clientIp;
     const now = Date.now();
-    const record = ipRequestCounts.get(clientIp);
+    const record = ipRequestCounts.get(userIdentifier);
 
     if (!record || now > record.resetTime) {
-      ipRequestCounts.set(clientIp, { count: 1, resetTime: now + windowMs });
+      ipRequestCounts.set(userIdentifier, { count: 1, resetTime: now + windowMs });
+      res.setHeader("X-RateLimit-Limit", maxRequests);
+      res.setHeader("X-RateLimit-Remaining", maxRequests - 1);
+      res.setHeader("X-RateLimit-Reset", Math.ceil((now + windowMs) / 1000));
       return next();
     }
 
+    const remaining = Math.max(0, maxRequests - record.count - 1);
+    res.setHeader("X-RateLimit-Limit", maxRequests);
+    res.setHeader("X-RateLimit-Remaining", remaining);
+    res.setHeader("X-RateLimit-Reset", Math.ceil(record.resetTime / 1000));
+
     if (record.count >= maxRequests) {
+      const retryAfterSec = Math.ceil((record.resetTime - now) / 1000);
+      res.setHeader("Retry-After", retryAfterSec);
       return res.status(429).json({
-        error: "Too many requests. Please wait a minute before generating new protocols.",
-        retryAfterMs: record.resetTime - now,
+        error: "Rate limit exceeded. Please wait before generating new agronomic protocols.",
+        retryAfterSeconds: retryAfterSec,
       });
     }
 
     record.count++;
     next();
   };
+}
+
+// In-memory caching layer for agronomy recommendations (Cost & Latency Optimization)
+interface CacheEntry {
+  response: any;
+  cachedAt: string;
+  expiresAt: number;
+}
+const recommendationCache = new Map<string, CacheEntry>();
+
+function getCacheKey(input: any): string {
+  return `${input.crop}:${input.region}:${input.predecessor}:${input.soilType}:${input.fieldArea}:${input.targetYield}:${input.organicMatter}:${input.budgetLevel}:${input.technology}:${input.language}`;
 }
 
 async function startServer() {
@@ -131,6 +154,20 @@ async function startServer() {
 
       const input = parseResult.data;
 
+      // Check Cache first (Cost & Latency Optimization)
+      const cacheKey = getCacheKey(input);
+      const cachedItem = recommendationCache.get(cacheKey);
+      if (cachedItem && Date.now() < cachedItem.expiresAt) {
+        res.setHeader("X-Cache", "HIT");
+        return res.json({
+          ...cachedItem.response,
+          source: "cache_hit",
+          cached: true,
+          cachedAt: cachedItem.cachedAt,
+        });
+      }
+      res.setHeader("X-Cache", "MISS");
+
       // First: Compute deterministic baseline
       const fertCalc = calculateFertilizerRequirements({
         cropId: input.crop,
@@ -151,6 +188,8 @@ async function startServer() {
 
       // Prepare Gemini Prompt
       const apiKey = process.env.GEMINI_API_KEY;
+      let llmFallbackReason = "no_api_key";
+
       if (apiKey) {
         try {
           const ai = new GoogleGenAI({
@@ -281,28 +320,51 @@ Respond in JSON adhering to the provided JSON schema.`;
 
           if (response.text) {
             const parsed = JSON.parse(response.text);
-            return res.json({
+            const hybridResponse = {
               success: true,
               source: "gemini_hybrid",
+              cached: false,
               data: parsed,
               baseline: { fertilizer: fertCalc, fuel: fuelInfo },
+            };
+
+            // Save in cache (TTL 1 hour)
+            recommendationCache.set(cacheKey, {
+              response: hybridResponse,
+              cachedAt: new Date().toISOString(),
+              expiresAt: Date.now() + 60 * 60 * 1000,
             });
+
+            return res.json(hybridResponse);
           }
         } catch (llmError: any) {
-          console.error("[AI Agronomist] Gemini call error, using deterministic fallback:", llmError);
+          console.error("[AI Agronomist] Gemini call error, engaging resilient fallback:", llmError?.message || llmError);
+          llmFallbackReason = llmError?.status === 429 ? "quota_limit" : "llm_error";
         }
       }
 
-      // Fallback response if API key is not present or LLM call fails
+      // Resilient Fallback response if API key is not present or LLM call fails
       const fallbackResult = buildDeterministicFallbackResponse(input, fertCalc, fuelInfo);
-      return res.json({
+      const fallbackResponse = {
         success: true,
         source: "deterministic_fallback",
+        fallbackReason: llmFallbackReason,
+        cached: false,
         data: fallbackResult,
         baseline: { fertilizer: fertCalc, fuel: fuelInfo },
+      };
+
+      // Cache fallback response briefly (10 mins) to prevent spamming failing API
+      recommendationCache.set(cacheKey, {
+        response: fallbackResponse,
+        cachedAt: new Date().toISOString(),
+        expiresAt: Date.now() + 10 * 60 * 1000,
       });
+
+      return res.json(fallbackResponse);
     } catch (err: any) {
       console.error("[AI Agronomist] Recommendation route error:", err);
+      // Even under fatal server errors, attempt fallback to preserve user experience
       res.status(500).json({ error: "Failed to generate recommendation", details: err.message });
     }
   });
