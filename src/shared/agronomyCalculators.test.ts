@@ -20,11 +20,6 @@ describe('Agronomy Calculators Engine', () => {
         organicMatterPercent: 3.2,
       });
 
-      // Base N removal = 28 * 6.0 = 168
-      // OM Credit = min(45, 3.2 * 10) = 32
-      // Legumes credit = 35
-      // Net N before soil efficiency = 168 - 32 - 35 = 101
-      // Soil efficiency (chernozem) = 0.85 -> 101 * 0.85 = 85.85 -> rounded to 85.9
       expect(result.nNeedKgHa).toBeCloseTo(85.9, 1);
       expect(result.p2o5NeedKgHa).toBeGreaterThan(0);
       expect(result.k2oNeedKgHa).toBeGreaterThan(0);
@@ -38,7 +33,7 @@ describe('Agronomy Calculators Engine', () => {
         targetYield: 6.0,
         soilTypeId: 'chernozem',
         predecessorId: 'winter_wheat',
-        organicMatterPercent: 6.0, // 6.0 * 10 = 60, should be capped at 45
+        organicMatterPercent: 6.0,
       });
 
       const resultOM45 = calculateFertilizerRequirements({
@@ -46,10 +41,47 @@ describe('Agronomy Calculators Engine', () => {
         targetYield: 6.0,
         soilTypeId: 'chernozem',
         predecessorId: 'winter_wheat',
-        organicMatterPercent: 4.5, // 4.5 * 10 = 45
+        organicMatterPercent: 4.5,
       });
 
       expect(resultHighOM.nNeedKgHa).toEqual(resultOM45.nNeedKgHa);
+    });
+
+    it('handles edge case: zero or negative organic matter safely', () => {
+      const resultZero = calculateFertilizerRequirements({
+        cropId: 'barley',
+        targetYield: 4.5,
+        soilTypeId: 'sandy',
+        predecessorId: 'sunflower',
+        organicMatterPercent: 0,
+      });
+
+      const resultNeg = calculateFertilizerRequirements({
+        cropId: 'barley',
+        targetYield: 4.5,
+        soilTypeId: 'sandy',
+        predecessorId: 'sunflower',
+        organicMatterPercent: -3,
+      });
+
+      expect(resultZero.nNeedKgHa).toBeGreaterThan(0);
+      expect(resultNeg.nNeedKgHa).toEqual(resultZero.nNeedKgHa);
+    });
+
+    it('handles edge case: zero target yield without crashing or returning NaN', () => {
+      const result = calculateFertilizerRequirements({
+        cropId: 'corn',
+        targetYield: 0,
+        soilTypeId: 'podzolic',
+        predecessorId: 'corn',
+        organicMatterPercent: 1.5,
+      });
+
+      expect(result.nNeedKgHa).toBe(0);
+      expect(result.p2o5NeedKgHa).toBe(0);
+      expect(result.k2oNeedKgHa).toBe(0);
+      expect(result.suggestedProducts.mapKgHa).toBe(0);
+      expect(result.suggestedProducts.ureaKgHa).toBe(0);
     });
 
     it('falls back gracefully to default crop profile if invalid cropId provided', () => {
@@ -63,6 +95,20 @@ describe('Agronomy Calculators Engine', () => {
 
       expect(result).toBeDefined();
       expect(result.nNeedKgHa).toBeGreaterThan(0);
+    });
+
+    it('falls back gracefully if invalid soilTypeId or predecessorId provided', () => {
+      const result = calculateFertilizerRequirements({
+        cropId: 'rapeseed',
+        targetYield: 3.5,
+        soilTypeId: 'unknown_soil_type',
+        predecessorId: 'unknown_predecessor',
+        organicMatterPercent: 2.5,
+      });
+
+      expect(result).toBeDefined();
+      expect(Number.isNaN(result.nNeedKgHa)).toBe(false);
+      expect(Number.isNaN(result.p2o5NeedKgHa)).toBe(false);
     });
   });
 
@@ -104,6 +150,34 @@ describe('Agronomy Calculators Engine', () => {
 
       expect(resultHighLoss.seedRateKgHa).toBeGreaterThan(resultLowLoss.seedRateKgHa);
     });
+
+    it('handles edge case: 0% germination or purity safely without Infinity/NaN', () => {
+      const resultZeroGerm = calculateSeedingRate({
+        cropId: 'soybean',
+        targetDensityPlantsM2: 60,
+        tkwGrams: 160,
+        germinationPercent: 0,
+        purityPercent: 98,
+        fieldEmergenceLossPercent: 10,
+      });
+
+      expect(Number.isFinite(resultZeroGerm.seedRateKgHa)).toBe(true);
+      expect(resultZeroGerm.seedRateKgHa).toBeGreaterThan(0);
+    });
+
+    it('handles small TKW values for small-seeded crops like rapeseed', () => {
+      const resultRapeseed = calculateSeedingRate({
+        cropId: 'rapeseed',
+        targetDensityPlantsM2: 50,
+        tkwGrams: 4.5,
+        germinationPercent: 90,
+        purityPercent: 97,
+        fieldEmergenceLossPercent: 12,
+      });
+
+      expect(resultRapeseed.seedRateKgHa).toBeGreaterThan(1.5);
+      expect(resultRapeseed.seedRateKgHa).toBeLessThan(10);
+    });
   });
 
   describe('calculateFuelAndWork', () => {
@@ -116,6 +190,22 @@ describe('Agronomy Calculators Engine', () => {
       expect(minTill.fuelLiterPerHa).toBeGreaterThan(noTill.fuelLiterPerHa);
       expect(noTill.breakdown.tillageLiters).toBe(0);
       expect(noTill.co2EstimateTons).toBeLessThan(conv.co2EstimateTons);
+    });
+
+    it('handles edge case: zero or negative area', () => {
+      const resultZero = calculateFuelAndWork({ fieldAreaHa: 0, technology: 'conventional' });
+      const resultNeg = calculateFuelAndWork({ fieldAreaHa: -50, technology: 'conventional' });
+
+      expect(resultZero.totalFuelLiters).toBe(0);
+      expect(resultZero.co2EstimateTons).toBe(0);
+      expect(resultNeg.totalFuelLiters).toBe(0);
+    });
+
+    it('falls back to conventional technology when invalid tech provided', () => {
+      const result = calculateFuelAndWork({ fieldAreaHa: 100, technology: 'space_till' as any });
+
+      expect(result.fuelLiterPerHa).toBeGreaterThan(0);
+      expect(result.totalFuelLiters).toBeGreaterThan(0);
     });
   });
 
@@ -133,15 +223,49 @@ describe('Agronomy Calculators Engine', () => {
         rentAndOtherUSDHa: 120,
       });
 
-      // Gross revenue = 3.2 * 440 = 1408
-      // Direct cost = 180 + 60 + 90 + 110 + 120 = 560
-      // Net margin = 1408 - 560 = 848
       expect(result.grossRevenueUSDHa).toBe(1408);
       expect(result.totalDirectCostUSDHa).toBe(560);
       expect(result.netMarginUSDHa).toBe(848);
       expect(result.totalFarmProfitUSD).toBe(848 * 50);
       expect(result.roiPercent).toBeGreaterThan(100);
       expect(result.breakEvenYieldTonHa).toBeCloseTo(560 / 440, 1);
+    });
+
+    it('handles edge case: zero direct costs without dividing by zero', () => {
+      const result = calculateEconomics({
+        cropId: 'wheat',
+        fieldAreaHa: 10,
+        targetYield: 5.0,
+        marketPriceUSD: 200,
+        fertilizerCostUSDHa: 0,
+        seedCostUSDHa: 0,
+        cropProtectionUSDHa: 0,
+        fuelMachineryUSDHa: 0,
+        rentAndOtherUSDHa: 0,
+      });
+
+      expect(result.totalDirectCostUSDHa).toBe(0);
+      expect(result.netMarginUSDHa).toBe(1000);
+      expect(Number.isFinite(result.roiPercent)).toBe(true);
+      expect(result.breakEvenYieldTonHa).toBe(0);
+    });
+
+    it('handles edge case: zero market price', () => {
+      const result = calculateEconomics({
+        cropId: 'wheat',
+        fieldAreaHa: 10,
+        targetYield: 5.0,
+        marketPriceUSD: 0,
+        fertilizerCostUSDHa: 100,
+        seedCostUSDHa: 0,
+        cropProtectionUSDHa: 0,
+        fuelMachineryUSDHa: 0,
+        rentAndOtherUSDHa: 0,
+      });
+
+      expect(result.grossRevenueUSDHa).toBe(0);
+      expect(result.netMarginUSDHa).toBe(-100);
+      expect(result.breakEvenYieldTonHa).toBe(0);
     });
   });
 });

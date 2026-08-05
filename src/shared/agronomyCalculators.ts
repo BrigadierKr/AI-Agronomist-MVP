@@ -209,12 +209,14 @@ export function calculateFertilizerRequirements(
   const crop = CROP_PROFILES[params.cropId] || CROP_PROFILES.wheat;
   const soil = SOIL_TYPES[params.soilTypeId] || SOIL_TYPES.chernozem;
   const predecessor = PREDECESSOR_CROPS[params.predecessorId] || PREDECESSOR_CROPS.winter_wheat;
-  const om = params.organicMatterPercent ?? 3.2;
+  const rawOm = params.organicMatterPercent ?? 3.2;
+  const om = Math.max(0, Number.isNaN(rawOm) ? 3.2 : rawOm);
+  const targetYield = Math.max(0, Number.isNaN(params.targetYield) ? 0 : params.targetYield);
 
   // Base removal requirement
-  const baseN = crop.nPerTon * params.targetYield;
-  const baseP = crop.pPerTon * params.targetYield;
-  const baseK = crop.kPerTon * params.targetYield;
+  const baseN = crop.nPerTon * targetYield;
+  const baseP = crop.pPerTon * targetYield;
+  const baseK = crop.kPerTon * targetYield;
 
   // Soil organic matter contribution (approx 10-15 kg N per 1% OM)
   const omNCredit = Math.min(45, om * 10);
@@ -313,6 +315,7 @@ export interface FuelOperationResult {
 }
 
 export function calculateFuelAndWork(params: CalculateFuelOperationParams): FuelOperationResult {
+  const fieldArea = Math.max(0, Number.isNaN(params.fieldAreaHa) ? 0 : params.fieldAreaHa);
   let tillage = 42;
   let sowing = 12;
   let spraying = 8;
@@ -328,9 +331,9 @@ export function calculateFuelAndWork(params: CalculateFuelOperationParams): Fuel
   }
 
   const fuelPerHa = tillage + sowing + spraying + harvesting + transport;
-  const totalFuelLiters = Math.round(fuelPerHa * params.fieldAreaHa);
+  const totalFuelLiters = Math.round(fuelPerHa * fieldArea);
   const machineHoursPerHa = params.technology === 'no_till' ? 1.8 : params.technology === 'min_till' ? 2.6 : 3.8;
-  const totalMachineHours = Math.round(machineHoursPerHa * params.fieldAreaHa * 10) / 10;
+  const totalMachineHours = Math.round(machineHoursPerHa * fieldArea * 10) / 10;
   const co2Tons = Math.round((totalFuelLiters * 2.68) / 1000 * 100) / 100; // 2.68 kg CO2 per liter diesel
 
   return {
@@ -370,17 +373,22 @@ export interface EconomicsResult {
 }
 
 export function calculateEconomics(params: CalculateEconomicsParams): EconomicsResult {
-  const grossRev = params.targetYield * params.marketPriceUSD;
-  const directCost =
-    params.fertilizerCostUSDHa +
-    params.seedCostUSDHa +
-    params.cropProtectionUSDHa +
-    params.fuelMachineryUSDHa +
-    params.rentAndOtherUSDHa;
+  const targetYield = Math.max(0, Number.isNaN(params.targetYield) ? 0 : params.targetYield);
+  const marketPrice = Math.max(0, Number.isNaN(params.marketPriceUSD) ? 0 : params.marketPriceUSD);
+  const fieldArea = Math.max(0, Number.isNaN(params.fieldAreaHa) ? 0 : params.fieldAreaHa);
+
+  const fertCost = Math.max(0, params.fertilizerCostUSDHa || 0);
+  const seedCost = Math.max(0, params.seedCostUSDHa || 0);
+  const protCost = Math.max(0, params.cropProtectionUSDHa || 0);
+  const fuelCost = Math.max(0, params.fuelMachineryUSDHa || 0);
+  const rentCost = Math.max(0, params.rentAndOtherUSDHa || 0);
+
+  const grossRev = targetYield * marketPrice;
+  const directCost = fertCost + seedCost + protCost + fuelCost + rentCost;
 
   const netMarginHa = grossRev - directCost;
-  const totalProfit = netMarginHa * params.fieldAreaHa;
-  const breakEvenYield = params.marketPriceUSD > 0 ? directCost / params.marketPriceUSD : 0;
+  const totalProfit = netMarginHa * fieldArea;
+  const breakEvenYield = marketPrice > 0 ? directCost / marketPrice : 0;
   const roi = directCost > 0 ? (netMarginHa / directCost) * 100 : 0;
 
   return {

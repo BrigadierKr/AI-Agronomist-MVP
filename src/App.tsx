@@ -83,6 +83,18 @@ export default function App() {
     } catch (e) {
       console.error('Failed to save protocol to localStorage', e);
     }
+
+    // Server-side cloud history sync
+    fetch('/api/history', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: newProtocol.id,
+        title: `${currentInputs.crop.toUpperCase()} - ${currentInputs.region} (${currentInputs.targetYield} t/ha)`,
+        crop: currentInputs.crop,
+        data: newProtocol,
+      }),
+    }).catch((err) => console.warn('Server history sync failed:', err));
   };
 
   const handleDeleteSaved = (id: string) => {

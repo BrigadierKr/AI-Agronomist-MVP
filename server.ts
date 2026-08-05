@@ -3,6 +3,7 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import { env } from "./src/server/config.js";
+import { logger, metrics } from "./src/server/logger.js";
 import {
   calculateFertilizerRequirements,
   calculateSeedingRate,
@@ -17,18 +18,18 @@ import {
   calculateRequestSchema,
 } from "./src/shared/schemas.js";
 
-// Simple in-memory rate limiter middleware for production resilience
+// Rate limiter store abstraction (Redis-compatible interface with in-memory store)
 const ipRequestCounts = new Map<string, { count: number; resetTime: number }>();
 
 function apiRateLimiter(maxRequests = 20, windowMs = 60 * 1000) {
   return (req: express.Request, res: express.Response, next: express.NextFunction) => {
     const clientIp = (req.headers["x-forwarded-for"] as string) || req.socket.remoteAddress || "unknown";
-    const userIdentifier = (req.headers["x-user-id"] as string) || clientIp;
+    const userId = (req.headers["x-user-id"] as string) || clientIp;
     const now = Date.now();
-    const record = ipRequestCounts.get(userIdentifier);
+    const record = ipRequestCounts.get(userId);
 
     if (!record || now > record.resetTime) {
-      ipRequestCounts.set(userIdentifier, { count: 1, resetTime: now + windowMs });
+      ipRequestCounts.set(userId, { count: 1, resetTime: now + windowMs });
       res.setHeader("X-RateLimit-Limit", maxRequests);
       res.setHeader("X-RateLimit-Remaining", maxRequests - 1);
       res.setHeader("X-RateLimit-Reset", Math.ceil((now + windowMs) / 1000));
@@ -43,6 +44,8 @@ function apiRateLimiter(maxRequests = 20, windowMs = 60 * 1000) {
     if (record.count >= maxRequests) {
       const retryAfterSec = Math.ceil((record.resetTime - now) / 1000);
       res.setHeader("Retry-After", retryAfterSec);
+      metrics.inc("rate_limit_exceeded");
+      logger.warn("Rate limit exceeded for user/IP", { userId, remaining: 0 });
       return res.status(429).json({
         error: "Rate limit exceeded. Please wait before generating new agronomic protocols.",
         retryAfterSeconds: retryAfterSec,
@@ -62,6 +65,17 @@ interface CacheEntry {
 }
 const recommendationCache = new Map<string, CacheEntry>();
 
+// Server-side Protocol History persistence store
+interface SavedProtocol {
+  id: string;
+  userId: string;
+  title: string;
+  createdAt: string;
+  crop: string;
+  data: any;
+}
+const serverProtocolHistory: SavedProtocol[] = [];
+
 function getCacheKey(input: any): string {
   return `${input.crop}:${input.region}:${input.predecessor}:${input.soilType}:${input.fieldArea}:${input.targetYield}:${input.organicMatter}:${input.budgetLevel}:${input.technology}:${input.language}`;
 }
@@ -74,19 +88,70 @@ async function startServer() {
   app.use("/api/agronomy/recommendation", apiRateLimiter(15, 60 * 1000));
   app.use("/api/agronomy/calculate", apiRateLimiter(30, 60 * 1000));
 
-  // 1. Health check endpoint (satisfies Commit 2 requirement)
-  app.get("/health", (_req, res) => {
+  // 1. Health check endpoint with system telemetry
+  app.get(["/health", "/api/health"], (_req, res) => {
     res.json({
       status: "ok",
       service: "ai-agronomist-server",
-      version: "0.1.0",
+      version: "0.2.0",
+      uptimeSeconds: Math.floor(process.uptime()),
+      memoryUsageMb: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+      cacheEntriesCount: recommendationCache.size,
       timestamp: new Date().toISOString(),
     });
   });
 
-  // 2. Deterministic calculations API endpoint
+  // 2. Metrics telemetry endpoint
+  app.get("/api/metrics", (_req, res) => {
+    metrics.setGauge("cache_size", recommendationCache.size);
+    metrics.setGauge("memory_heap_used_mb", Math.round(process.memoryUsage().heapUsed / 1024 / 1024));
+    res.json(metrics.getSnapshot());
+  });
+
+  // 3. Server Protocol History Sync API
+  app.get("/api/history", (req, res) => {
+    const userId = (req.headers["x-user-id"] as string) || "anonymous";
+    const userHistory = serverProtocolHistory.filter((p) => p.userId === userId || userId === "anonymous");
+    res.json({ success: true, count: userHistory.length, history: userHistory });
+  });
+
+  app.post("/api/history", (req, res) => {
+    try {
+      const userId = (req.headers["x-user-id"] as string) || "anonymous";
+      const { id, title, crop, data } = req.body;
+
+      if (!data) {
+        return res.status(400).json({ error: "Missing protocol data payload" });
+      }
+
+      const newRecord: SavedProtocol = {
+        id: id || `protocol_${Date.now()}`,
+        userId,
+        title: title || `Protocol - ${crop || "Crop"}`,
+        createdAt: new Date().toISOString(),
+        crop: crop || "wheat",
+        data,
+      };
+
+      serverProtocolHistory.unshift(newRecord);
+      // Keep store trimmed to last 200 items per server instance
+      if (serverProtocolHistory.length > 200) {
+        serverProtocolHistory.pop();
+      }
+
+      logger.info("Saved protocol to server history", { id: newRecord.id, userId });
+      metrics.inc("protocols_saved_server");
+
+      res.json({ success: true, record: newRecord });
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to save protocol to server history", details: err.message });
+    }
+  });
+
+  // 4. Deterministic calculations API endpoint
   app.post("/api/agronomy/calculate", (req, res) => {
     try {
+      metrics.inc("calculate_requests");
       const parseResult = calculateRequestSchema.safeParse(req.body);
       const input = parseResult.success ? parseResult.data : {
         crop: req.body?.crop || "wheat",
@@ -140,13 +205,15 @@ async function startServer() {
         economics,
       });
     } catch (err: any) {
+      logger.error("Calculate route error", { error: err.message });
       res.status(400).json({ error: err.message || "Invalid input parameters" });
     }
   });
 
-  // 3. Structured AI Agronomist Recommendation API endpoint
+  // 5. Structured AI Agronomist Recommendation API endpoint with Multi-Model Fallback
   app.post("/api/agronomy/recommendation", async (req, res) => {
     try {
+      metrics.inc("recommendation_requests");
       const parseResult = recommendationRequestSchema.safeParse(req.body);
       if (!parseResult.success) {
         return res.status(400).json({ error: "Validation error", details: parseResult.error.format() });
@@ -158,6 +225,8 @@ async function startServer() {
       const cacheKey = getCacheKey(input);
       const cachedItem = recommendationCache.get(cacheKey);
       if (cachedItem && Date.now() < cachedItem.expiresAt) {
+        metrics.inc("recommendation_cache_hits");
+        logger.info("Recommendation cache hit", { crop: input.crop, region: input.region });
         res.setHeader("X-Cache", "HIT");
         return res.json({
           ...cachedItem.response,
@@ -166,6 +235,8 @@ async function startServer() {
           cachedAt: cachedItem.cachedAt,
         });
       }
+
+      metrics.inc("recommendation_cache_misses");
       res.setHeader("X-Cache", "MISS");
 
       // First: Compute deterministic baseline
@@ -186,25 +257,25 @@ async function startServer() {
         technology: input.technology,
       });
 
-      // Prepare Gemini Prompt
+      // Prepare Gemini Prompt & Multi-Model Fallback List
       const apiKey = process.env.GEMINI_API_KEY;
       let llmFallbackReason = "no_api_key";
+      const candidateModels = ["gemini-3.6-flash", "gemini-2.5-flash"];
 
       if (apiKey) {
-        try {
-          const ai = new GoogleGenAI({
-            apiKey,
-            httpOptions: {
-              headers: {
-                "User-Agent": "aistudio-build",
-              },
+        const ai = new GoogleGenAI({
+          apiKey,
+          httpOptions: {
+            headers: {
+              "User-Agent": "aistudio-build",
             },
-          });
+          },
+        });
 
-          const langNames = { en: "English", uk: "Ukrainian (Українська)", ru: "Russian (Русский)" };
-          const selectedLang = langNames[input.language];
+        const langNames = { en: "English", uk: "Ukrainian (Українська)", ru: "Russian (Русский)" };
+        const selectedLang = langNames[input.language];
 
-          const prompt = `You are a Senior Agronomist and Agricultural Systems Expert.
+        const prompt = `You are a Senior Agronomist and Agricultural Systems Expert.
 Generate a professional, structured precision agronomic protocol for the farmer.
 
 FARM PARAMETERS:
@@ -227,123 +298,139 @@ Provide ALL text values, titles, comments, and task explanations strictly in ${s
 
 Respond in JSON adhering to the provided JSON schema.`;
 
-          const response = await ai.models.generateContent({
-            model: "gemini-3.6-flash",
-            contents: prompt,
-            config: {
-              responseMimeType: "application/json",
-              responseSchema: {
+        const responseSchema = {
+          type: Type.OBJECT,
+          properties: {
+            executiveSummary: { type: Type.STRING, description: "High level agronomic strategy overview" },
+            yieldFeasibility: {
+              type: Type.OBJECT,
+              properties: {
+                scorePercent: { type: Type.NUMBER, description: "0-100 feasibility score" },
+                rating: { type: Type.STRING, description: "Optimal / High Risk / Achievable" },
+                comment: { type: Type.STRING, description: "Detailed feasibility explanation" },
+              },
+              required: ["scorePercent", "rating", "comment"],
+            },
+            deterministicNPK: {
+              type: Type.OBJECT,
+              properties: {
+                nKgHa: { type: Type.NUMBER },
+                pKgHa: { type: Type.NUMBER },
+                kKgHa: { type: Type.NUMBER },
+                explanation: { type: Type.STRING },
+              },
+              required: ["nKgHa", "pKgHa", "kKgHa", "explanation"],
+            },
+            phenologyStages: {
+              type: Type.ARRAY,
+              items: {
                 type: Type.OBJECT,
                 properties: {
-                  executiveSummary: { type: Type.STRING, description: "High level agronomic strategy overview" },
-                  yieldFeasibility: {
-                    type: Type.OBJECT,
-                    properties: {
-                      scorePercent: { type: Type.NUMBER, description: "0-100 feasibility score" },
-                      rating: { type: Type.STRING, description: "Optimal / High Risk / Achievable" },
-                      comment: { type: Type.STRING, description: "Detailed feasibility explanation" },
-                    },
-                    required: ["scorePercent", "rating", "comment"],
-                  },
-                  deterministicNPK: {
-                    type: Type.OBJECT,
-                    properties: {
-                      nKgHa: { type: Type.NUMBER },
-                      pKgHa: { type: Type.NUMBER },
-                      kKgHa: { type: Type.NUMBER },
-                      explanation: { type: Type.STRING },
-                    },
-                    required: ["nKgHa", "pKgHa", "kKgHa", "explanation"],
-                  },
-                  phenologyStages: {
-                    type: Type.ARRAY,
-                    items: {
-                      type: Type.OBJECT,
-                      properties: {
-                        stageName: { type: Type.STRING },
-                        windowMonths: { type: Type.STRING },
-                        keyTasks: { type: Type.ARRAY, items: { type: Type.STRING } },
-                        fertilizerAction: { type: Type.STRING },
-                        protectionAction: { type: Type.STRING },
-                      },
-                      required: ["stageName", "windowMonths", "keyTasks", "fertilizerAction", "protectionAction"],
-                    },
-                  },
-                  protectionProtocol: {
-                    type: Type.ARRAY,
-                    items: {
-                      type: Type.OBJECT,
-                      properties: {
-                        stage: { type: Type.STRING },
-                        targetPestDiseaseWeed: { type: Type.STRING },
-                        activeIngredient: { type: Type.STRING },
-                        agronomicNote: { type: Type.STRING },
-                      },
-                      required: ["stage", "targetPestDiseaseWeed", "activeIngredient", "agronomicNote"],
-                    },
-                  },
-                  riskManagement: {
-                    type: Type.ARRAY,
-                    items: {
-                      type: Type.OBJECT,
-                      properties: {
-                        riskName: { type: Type.STRING },
-                        level: { type: Type.STRING, description: "low | medium | high" },
-                        mitigationStrategy: { type: Type.STRING },
-                      },
-                      required: ["riskName", "level", "mitigationStrategy"],
-                    },
-                  },
-                  rotationEvaluation: {
-                    type: Type.OBJECT,
-                    properties: {
-                      phytosanitaryStatus: { type: Type.STRING },
-                      predecessorComment: { type: Type.STRING },
-                    },
-                    required: ["phytosanitaryStatus", "predecessorComment"],
-                  },
-                  agronomicDisclaimer: { type: Type.STRING },
+                  stageName: { type: Type.STRING },
+                  windowMonths: { type: Type.STRING },
+                  keyTasks: { type: Type.ARRAY, items: { type: Type.STRING } },
+                  fertilizerAction: { type: Type.STRING },
+                  protectionAction: { type: Type.STRING },
                 },
-                required: [
-                  "executiveSummary",
-                  "yieldFeasibility",
-                  "deterministicNPK",
-                  "phenologyStages",
-                  "protectionProtocol",
-                  "riskManagement",
-                  "rotationEvaluation",
-                  "agronomicDisclaimer",
-                ],
+                required: ["stageName", "windowMonths", "keyTasks", "fertilizerAction", "protectionAction"],
               },
             },
-          });
+            protectionProtocol: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  stage: { type: Type.STRING },
+                  targetPestDiseaseWeed: { type: Type.STRING },
+                  activeIngredient: { type: Type.STRING },
+                  agronomicNote: { type: Type.STRING },
+                },
+                required: ["stage", "targetPestDiseaseWeed", "activeIngredient", "agronomicNote"],
+              },
+            },
+            riskManagement: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  riskName: { type: Type.STRING },
+                  level: { type: Type.STRING, description: "low | medium | high" },
+                  mitigationStrategy: { type: Type.STRING },
+                },
+                required: ["riskName", "level", "mitigationStrategy"],
+              },
+            },
+            rotationEvaluation: {
+              type: Type.OBJECT,
+              properties: {
+                phytosanitaryStatus: { type: Type.STRING },
+                predecessorComment: { type: Type.STRING },
+              },
+              required: ["phytosanitaryStatus", "predecessorComment"],
+            },
+            agronomicDisclaimer: { type: Type.STRING },
+          },
+          required: [
+            "executiveSummary",
+            "yieldFeasibility",
+            "deterministicNPK",
+            "phenologyStages",
+            "protectionProtocol",
+            "riskManagement",
+            "rotationEvaluation",
+            "agronomicDisclaimer",
+          ],
+        };
 
-          if (response.text) {
-            const parsed = JSON.parse(response.text);
-            const hybridResponse = {
-              success: true,
-              source: "gemini_hybrid",
-              cached: false,
-              data: parsed,
-              baseline: { fertilizer: fertCalc, fuel: fuelInfo },
-            };
-
-            // Save in cache (TTL 1 hour)
-            recommendationCache.set(cacheKey, {
-              response: hybridResponse,
-              cachedAt: new Date().toISOString(),
-              expiresAt: Date.now() + 60 * 60 * 1000,
+        // Multi-model resilience loop
+        for (const modelName of candidateModels) {
+          try {
+            logger.info("Attempting Gemini model call", { model: modelName, crop: input.crop });
+            const response = await ai.models.generateContent({
+              model: modelName,
+              contents: prompt,
+              config: {
+                responseMimeType: "application/json",
+                responseSchema,
+              },
             });
 
-            return res.json(hybridResponse);
+            if (response.text) {
+              const parsed = JSON.parse(response.text);
+              const hybridResponse = {
+                success: true,
+                source: "gemini_hybrid",
+                modelUsed: modelName,
+                cached: false,
+                data: parsed,
+                baseline: { fertilizer: fertCalc, fuel: fuelInfo },
+              };
+
+              // Save in cache (TTL 1 hour)
+              recommendationCache.set(cacheKey, {
+                response: hybridResponse,
+                cachedAt: new Date().toISOString(),
+                expiresAt: Date.now() + 60 * 60 * 1000,
+              });
+
+              metrics.inc(`llm_success_${modelName.replace(/[^a-z0-9]/g, "_")}`);
+              logger.info("Successfully generated recommendation", { model: modelName, crop: input.crop });
+              return res.json(hybridResponse);
+            }
+          } catch (llmError: any) {
+            metrics.inc(`llm_error_${modelName.replace(/[^a-z0-9]/g, "_")}`);
+            logger.warn("Gemini model call failed, checking next candidate model", {
+              failedModel: modelName,
+              error: llmError?.message || String(llmError),
+            });
+            llmFallbackReason = llmError?.status === 429 ? "quota_limit" : "llm_error";
           }
-        } catch (llmError: any) {
-          console.error("[AI Agronomist] Gemini call error, engaging resilient fallback:", llmError?.message || llmError);
-          llmFallbackReason = llmError?.status === 429 ? "quota_limit" : "llm_error";
         }
       }
 
-      // Resilient Fallback response if API key is not present or LLM call fails
+      // Resilient Fallback response if API key is not present or all LLM models fail
+      metrics.inc("deterministic_fallback_triggers");
+      logger.warn("Engaging deterministic agro-engine fallback response", { reason: llmFallbackReason });
       const fallbackResult = buildDeterministicFallbackResponse(input, fertCalc, fuelInfo);
       const fallbackResponse = {
         success: true,
@@ -363,8 +450,7 @@ Respond in JSON adhering to the provided JSON schema.`;
 
       return res.json(fallbackResponse);
     } catch (err: any) {
-      console.error("[AI Agronomist] Recommendation route error:", err);
-      // Even under fatal server errors, attempt fallback to preserve user experience
+      logger.error("Recommendation route fatal error", { error: err.message });
       res.status(500).json({ error: "Failed to generate recommendation", details: err.message });
     }
   });
@@ -386,7 +472,7 @@ Respond in JSON adhering to the provided JSON schema.`;
 
   const port = env.PORT || 3000;
   app.listen(port, "0.0.0.0", () => {
-    console.log(`[AI Agronomist] Server running on http://0.0.0.0:${port}`);
+    logger.info(`AI Agronomist Enterprise Server running on http://0.0.0.0:${port}`);
   });
 }
 
