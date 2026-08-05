@@ -20,15 +20,22 @@
   body {
     background-color: #ffffff !important;
     color: #111111 !important;
+    margin: 0 !important;
+    padding: 0 !important;
   }
   
-  header, nav, button, .print\:hidden {
+  header, nav, footer, button, form, .print\:hidden {
     display: none !important;
   }
   
   #printable-report {
     color: #111111 !important;
     background-color: #ffffff !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 1rem !important;
+    box-shadow: none !important;
   }
 
   #printable-report * {
@@ -36,5 +43,16 @@
     color: #111111 !important;
     border-color: #d1d5db !important;
     box-shadow: none !important;
+    text-shadow: none !important;
+  }
+
+  #printable-report table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+  }
+
+  #printable-report th, #printable-report td {
+    border: 1px solid #d1d5db !important;
+    padding: 6px 10px !important;
   }
 }

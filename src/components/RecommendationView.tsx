@@ -8,6 +8,7 @@ import {
   Shield,
   RotateCcw,
   Printer,
+  Download,
   BookmarkPlus,
   Scale,
   Fuel,
@@ -33,8 +34,88 @@ export const RecommendationView: React.FC<RecommendationViewProps> = ({
   const rec = data.data;
   const baseline = data.baseline;
 
+  const handleDownloadHtml = () => {
+    const reportElement = document.getElementById('printable-report');
+    if (!reportElement) return;
+
+    const clone = reportElement.cloneNode(true) as HTMLElement;
+    const hideable = clone.querySelectorAll('.print\\:hidden');
+    hideable.forEach((el) => el.remove());
+
+    const htmlContent = `<!DOCTYPE html>
+<html lang="${currentLang}">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agronomic_Protocol_AI_Agronomist_${new Date().toISOString().slice(0, 10)}</title>
+  <style>
+    @media print {
+      body { background: #ffffff !important; color: #111111 !important; margin: 0; padding: 10mm; }
+      .no-print { display: none !important; }
+      #report-content * { background: transparent !important; color: #111 !important; border-color: #d1d5db !important; }
+    }
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background-color: #0f0f11;
+      color: #e4e4e7;
+      margin: 0;
+      padding: 24px;
+      line-height: 1.5;
+    }
+    .print-bar {
+      background: #18181b;
+      border: 1px solid #27272a;
+      padding: 12px 20px;
+      margin-bottom: 24px;
+      border-radius: 8px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .btn-print {
+      background: #84a98c;
+      color: #0a0a0b;
+      border: none;
+      padding: 8px 18px;
+      border-radius: 4px;
+      font-weight: bold;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+    th, td { border: 1px solid #27272a; padding: 8px 12px; text-align: left; font-size: 13px; }
+    th { background: #18181b; color: #84a98c; }
+  </style>
+</head>
+<body>
+  <div class="print-bar no-print">
+    <span style="font-size: 14px; font-weight: 600; color: #84a98c;">🌾 AI Agronomist — Precision Protocol Export</span>
+    <button class="btn-print" onclick="window.print()">🖨️ ${t.exportPdf}</button>
+  </div>
+  <div id="report-content">
+    ${clone.innerHTML}
+  </div>
+</body>
+</html>`;
+
+    const blob = new Blob([htmlContent], { type: 'text/html;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `Agronomic_Protocol_${new Date().toISOString().slice(0, 10)}.html`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   const handlePrint = () => {
-    window.print();
+    try {
+      window.print();
+    } catch (err) {
+      console.warn("Direct window.print() blocked or unavailable, downloading HTML file fallback:", err);
+      handleDownloadHtml();
+    }
   };
 
   const score = rec.yieldFeasibility?.scorePercent || 85;
@@ -70,12 +151,12 @@ export const RecommendationView: React.FC<RecommendationViewProps> = ({
           </div>
         </div>
 
-        {/* Print & Save Buttons */}
-        <div className="flex items-center space-x-3 print:hidden">
+        {/* Print & Download & Save Buttons */}
+        <div className="flex flex-wrap items-center gap-2.5 print:hidden">
           <button
             onClick={onSave}
             disabled={isSaved}
-            className={`inline-flex items-center space-x-1.5 px-3.5 py-2 rounded text-xs font-mono border transition ${
+            className={`inline-flex items-center space-x-1.5 px-3 py-2 rounded text-xs font-mono border transition ${
               isSaved
                 ? 'bg-[#18181B] text-[#52525B] border-[#27272A]'
                 : 'bg-[#18181B] hover:bg-[#27272A] text-[#84A98C] border-[#27272A]'
@@ -86,8 +167,17 @@ export const RecommendationView: React.FC<RecommendationViewProps> = ({
           </button>
 
           <button
+            onClick={handleDownloadHtml}
+            title="Download formatted printable HTML file"
+            className="inline-flex items-center space-x-1.5 px-3 py-2 rounded bg-[#18181B] hover:bg-[#27272A] text-[#E4E4E7] border border-[#27272A] font-mono text-xs transition"
+          >
+            <Download className="w-4 h-4 text-[#84A98C]" />
+            <span>{t.downloadFile}</span>
+          </button>
+
+          <button
             onClick={handlePrint}
-            className="inline-flex items-center space-x-1.5 px-4 py-2 rounded bg-[#84A98C] hover:bg-[#A3C4AC] text-[#0A0A0B] font-bold text-xs uppercase tracking-wider transition"
+            className="inline-flex items-center space-x-1.5 px-3.5 py-2 rounded bg-[#84A98C] hover:bg-[#A3C4AC] text-[#0A0A0B] font-bold text-xs uppercase tracking-wider transition shadow-sm"
           >
             <Printer className="w-4 h-4" />
             <span>{t.exportPdf}</span>

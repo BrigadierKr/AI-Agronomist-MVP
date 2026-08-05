@@ -61,6 +61,7 @@ export const translations = {
     rotationTitle: 'Crop Rotation & Phytosanitary Assessment',
     disclaimerTitle: 'Agronomic Disclaimer',
     exportPdf: 'Print / Export Report',
+    downloadFile: 'Download (.html / PDF)',
     saveProtocol: 'Save to History',
     savedNotice: 'Protocol saved to local history!',
 
@@ -136,6 +137,7 @@ export const translations = {
     rotationTitle: 'Оцінка сівозміни та фітосанітарного стану',
     disclaimerTitle: 'Застереження агронома',
     exportPdf: 'Друк / Експорт звіту',
+    downloadFile: 'Завантажити файл (.html / PDF)',
     saveProtocol: 'Зберегти в історію',
     savedNotice: 'Протокол збережено в локальну історію!',
 
@@ -211,6 +213,7 @@ export const translations = {
     rotationTitle: 'Оценка севооборота и фитосанитарного состояния',
     disclaimerTitle: 'Предостережение агронома',
     exportPdf: 'Печать / Экспорт отчёта',
+    downloadFile: 'Скачать файл (.html / PDF)',
     saveProtocol: 'Сохранить в историю',
     savedNotice: 'Протокол сохранён в локальную историю!',
 

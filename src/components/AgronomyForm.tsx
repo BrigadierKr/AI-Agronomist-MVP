@@ -90,7 +90,7 @@ export const AgronomyForm: React.FC<AgronomyFormProps> = ({
   };
 
   return (
-    <div className="bg-[#0F0F11] border border-[#27272A] rounded-xl p-6 shadow-xl">
+    <div className="bg-[#0F0F11] border border-[#27272A] rounded-xl p-6 shadow-xl print:hidden">
       {/* Header and presets */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-5 border-b border-[#27272A]">
         <div>

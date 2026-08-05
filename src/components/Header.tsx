@@ -21,7 +21,7 @@ export const Header: React.FC<HeaderProps> = ({
   const t = getTranslation(currentLang);
 
   return (
-    <header className="bg-[#0F0F11] border-b border-[#27272A] text-[#E4E4E7] sticky top-0 z-40">
+    <header className="bg-[#0F0F11] border-b border-[#27272A] text-[#E4E4E7] sticky top-0 z-40 print:hidden">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3.5 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         {/* Brand identity */}
         <div className="flex items-center space-x-3.5">

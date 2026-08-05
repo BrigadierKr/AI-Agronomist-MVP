@@ -129,7 +129,7 @@ export default function App() {
             />
 
             {error && (
-              <div className="bg-rose-950/80 border border-rose-800 rounded-2xl p-4 text-rose-200 text-xs flex items-center space-x-3">
+              <div className="bg-rose-950/80 border border-rose-800 rounded-2xl p-4 text-rose-200 text-xs flex items-center space-x-3 print:hidden">
                 <AlertCircle className="w-5 h-5 text-rose-400 flex-shrink-0" />
                 <div>
                   <span className="font-bold block mb-0.5">Calculation Error</span>
@@ -165,7 +165,7 @@ export default function App() {
       </main>
 
       {/* Footer */}
-      <footer className="border-t border-slate-900 bg-slate-950 text-slate-500 text-xs py-6 mt-12">
+      <footer className="border-t border-slate-900 bg-slate-950 text-slate-500 text-xs py-6 mt-12 print:hidden">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-4">
           <p>© 2026 AI Agronomist MVP. Built with Gemini AI + Deterministic Agro Engine.</p>
           <div className="flex items-center space-x-4 text-slate-400 font-medium">
