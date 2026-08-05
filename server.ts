@@ -2,7 +2,6 @@ import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
-import { z } from "zod";
 import { env } from "./src/server/config.js";
 import {
   calculateFertilizerRequirements,
@@ -13,23 +12,44 @@ import {
   SOIL_TYPES,
   PREDECESSOR_CROPS,
 } from "./src/shared/agronomyCalculators.js";
+import {
+  recommendationRequestSchema,
+  calculateRequestSchema,
+} from "./src/shared/schemas.js";
 
-const recommendationRequestSchema = z.object({
-  crop: z.string().default("wheat"),
-  region: z.string().default("Central Steppe / Poltava"),
-  predecessor: z.string().default("legumes"),
-  soilType: z.string().default("chernozem"),
-  fieldArea: z.number().positive().default(100),
-  targetYield: z.number().positive().default(6.0),
-  organicMatter: z.number().min(0.5).max(12).default(3.2),
-  budgetLevel: z.enum(["low_input", "standard", "intensive"]).default("standard"),
-  technology: z.enum(["conventional", "min_till", "no_till"]).default("conventional"),
-  language: z.enum(["en", "uk", "ru"]).default("uk"),
-});
+// Simple in-memory rate limiter middleware for production resilience
+const ipRequestCounts = new Map<string, { count: number; resetTime: number }>();
+
+function apiRateLimiter(maxRequests = 20, windowMs = 60 * 1000) {
+  return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const clientIp = (req.headers["x-forwarded-for"] as string) || req.socket.remoteAddress || "unknown";
+    const now = Date.now();
+    const record = ipRequestCounts.get(clientIp);
+
+    if (!record || now > record.resetTime) {
+      ipRequestCounts.set(clientIp, { count: 1, resetTime: now + windowMs });
+      return next();
+    }
+
+    if (record.count >= maxRequests) {
+      return res.status(429).json({
+        error: "Too many requests. Please wait a minute before generating new protocols.",
+        retryAfterMs: record.resetTime - now,
+      });
+    }
+
+    record.count++;
+    next();
+  };
+}
 
 async function startServer() {
   const app = express();
   app.use(express.json());
+
+  // Apply rate limiter to AI API endpoints
+  app.use("/api/agronomy/recommendation", apiRateLimiter(15, 60 * 1000));
+  app.use("/api/agronomy/calculate", apiRateLimiter(30, 60 * 1000));
 
   // 1. Health check endpoint (satisfies Commit 2 requirement)
   app.get("/health", (_req, res) => {
@@ -44,18 +64,28 @@ async function startServer() {
   // 2. Deterministic calculations API endpoint
   app.post("/api/agronomy/calculate", (req, res) => {
     try {
-      const { crop, targetYield, soilType, predecessor, organicMatter, fieldArea, technology } = req.body;
+      const parseResult = calculateRequestSchema.safeParse(req.body);
+      const input = parseResult.success ? parseResult.data : {
+        crop: req.body?.crop || "wheat",
+        targetYield: Number(req.body?.targetYield) || 6.0,
+        soilType: req.body?.soilType || "chernozem",
+        predecessor: req.body?.predecessor || "winter_wheat",
+        organicMatter: Number(req.body?.organicMatter) || 3.2,
+        fieldArea: Number(req.body?.fieldArea) || 100,
+        technology: req.body?.technology || "conventional",
+      };
+
       const fertilizer = calculateFertilizerRequirements({
-        cropId: crop || "wheat",
-        targetYield: Number(targetYield) || 6.0,
-        soilTypeId: soilType || "chernozem",
-        predecessorId: predecessor || "winter_wheat",
-        organicMatterPercent: Number(organicMatter) || 3.2,
+        cropId: input.crop,
+        targetYield: input.targetYield,
+        soilTypeId: input.soilType,
+        predecessorId: input.predecessor,
+        organicMatterPercent: input.organicMatter,
       });
 
-      const cropProf = CROP_PROFILES[crop] || CROP_PROFILES.wheat;
+      const cropProf = CROP_PROFILES[input.crop] || CROP_PROFILES.wheat;
       const seeding = calculateSeedingRate({
-        cropId: crop || "wheat",
+        cropId: input.crop || "wheat",
         targetDensityPlantsM2: cropProf.defaultDensity > 1 ? cropProf.defaultDensity * 100 : cropProf.defaultDensity * 1000,
         tkwGrams: cropProf.defaultTKW,
         germinationPercent: 95,
@@ -64,14 +94,14 @@ async function startServer() {
       });
 
       const fuelWork = calculateFuelAndWork({
-        fieldAreaHa: Number(fieldArea) || 100,
-        technology: (technology as any) || "conventional",
+        fieldAreaHa: input.fieldArea || 100,
+        technology: (input.technology as any) || "conventional",
       });
 
       const economics = calculateEconomics({
-        cropId: crop || "wheat",
-        fieldAreaHa: Number(fieldArea) || 100,
-        targetYield: Number(targetYield) || 6.0,
+        cropId: input.crop || "wheat",
+        fieldAreaHa: input.fieldArea || 100,
+        targetYield: input.targetYield || 6.0,
         marketPriceUSD: cropProf.pricePerTonUSD,
         fertilizerCostUSDHa: Math.round(fertilizer.nNeedKgHa * 1.2 + fertilizer.p2o5NeedKgHa * 1.5 + fertilizer.k2oNeedKgHa * 1.1),
         seedCostUSDHa: Math.round(seeding.seedRateKgHa * 1.8),
